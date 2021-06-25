@@ -15,8 +15,8 @@ use tokio::time::timeout;
 use crate::common::resources::ResourceAllocation;
 use crate::messages::common::WorkerConfiguration;
 use crate::messages::worker::{
-    FromWorkerMessage, RegisterWorker, StealResponseMsg, ToWorkerMessage, WorkerOverview,
-    WorkerRegistrationResponse,
+    ConnectionRegistration, FromWorkerMessage, RegisterWorker, StealResponseMsg, ToWorkerMessage,
+    WorkerOverview, WorkerRegistrationResponse,
 };
 use crate::server::worker::WorkerId;
 use crate::transfer::auth::{
@@ -98,9 +98,9 @@ pub async fn run_worker(
     let taskset = LocalSet::default();
 
     {
-        let message = RegisterWorker {
+        let message = ConnectionRegistration::Worker(RegisterWorker {
             configuration: configuration.clone(),
-        };
+        });
         let data = serialize(&message)?.into();
         writer.send(seal_message(&mut sealer, data)).await?;
     }
