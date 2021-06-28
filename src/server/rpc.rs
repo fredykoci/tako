@@ -67,7 +67,9 @@ pub async fn connection_initiator(
                     }
                 }
                 ConnectionRegistration::Custom => {
-                    todo!()
+                    if let Some(handler) = core_ref.get().custom_conn_handler() {
+                        handler(connection);
+                    }
                 }
             }
         });
