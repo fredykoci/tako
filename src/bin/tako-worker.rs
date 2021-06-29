@@ -7,15 +7,19 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use tokio::task::LocalSet;
 
+use futures::future::BoxFuture;
 use orion::kdf::SecretKey;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use tako::common::error::DsError;
 use tako::common::resources::ResourceDescriptor;
 use tako::common::secret::read_secret_file;
 use tako::common::setup::setup_logging;
-use tako::messages::common::{LauncherDefinition, ProgramDefinition, WorkerConfiguration};
-use tako::worker::launcher::pin_program;
+use tako::messages::common::{ProgramDefinition, WorkerConfiguration};
+use tako::worker::launcher::{command_from_definitions, pin_program};
 use tako::worker::rpc::run_worker;
-use tako::worker::task::Task;
+use tako::worker::task::{Task, TaskRef};
 
 #[derive(Clap)]
 #[clap(version = "1.0")]
@@ -65,13 +69,39 @@ fn create_paths(
     Ok((work_dir, local_dir))
 }
 
-#[allow(clippy::unnecessary_wraps)] // This function needs to match an interface
-fn launcher_setup(task: &Task, def: LauncherDefinition) -> tako::Result<ProgramDefinition> {
-    let mut program = def.program;
+async fn launcher_main(task_ref: TaskRef) -> tako::Result<()> {
+    log::debug!(
+        "Starting program launcher {} {:?} {:?}",
+        task_ref.get().id,
+        &task_ref.get().resources,
+        task_ref.get().resource_allocation()
+    );
+
+    let program: ProgramDefinition = {
+        let task = task_ref.get();
+        rmp_serde::from_slice(&task.spec)?
+    };
+
+    let mut command = command_from_definitions(&program)?;
+    let status = command.status().await?;
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return tako::Result::Err(DsError::GenericError(format!(
+            "Program terminated with exit code {}",
+            code
+        )));
+    }
+    Ok(())
+}
+
+fn launcher(task_ref: &TaskRef) -> Pin<Box<dyn Future<Output = tako::Result<()>> + 'static>> {
+    /*let mut program = def.program;
     if def.pin {
         pin_program(&mut program, task.resource_allocation().unwrap());
     }
-    Ok(program)
+    Ok(program)*/
+    let task_ref = task_ref.clone();
+    Box::pin(async move { launcher_main(task_ref).await })
 }
 
 async fn worker_main(
@@ -83,7 +113,7 @@ async fn worker_main(
         server_address,
         configuration,
         secret_key,
-        Box::new(launcher_setup),
+        Box::new(launcher),
     )
     .await?;
     worker_future.await;

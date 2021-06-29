@@ -26,7 +26,7 @@ use crate::transfer::fetch::fetch_data;
 use crate::transfer::transport::{connect_to_worker, make_protocol_builder};
 use crate::transfer::DataConnection;
 use crate::worker::data::{DataObjectRef, DataObjectState};
-use crate::worker::launcher::LauncherSetup;
+use crate::worker::launcher::InnerTaskLauncher;
 use crate::worker::reactor::assign_task;
 use crate::worker::state::WorkerStateRef;
 use crate::worker::task::TaskRef;
@@ -79,7 +79,7 @@ pub async fn run_worker(
     scheduler_address: &str,
     mut configuration: WorkerConfiguration,
     secret_key: Option<Arc<SecretKey>>,
-    launcher_setup: LauncherSetup,
+    launcher_setup: InnerTaskLauncher,
 ) -> crate::Result<((WorkerId, WorkerConfiguration), impl Future<Output = ()>)> {
     let (listener, address) = start_listener().await?;
     configuration.listen_address = address;
