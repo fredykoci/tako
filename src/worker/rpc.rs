@@ -34,6 +34,7 @@ use crate::Priority;
 use crate::PriorityTuple;
 use std::future::Future;
 use std::sync::Arc;
+use crate::server::rpc::ConnectionDescriptor;
 
 async fn start_listener() -> crate::Result<(TcpListener, String)> {
     let address = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
@@ -50,22 +51,18 @@ async fn start_listener() -> crate::Result<(TcpListener, String)> {
     Ok((listener, address))
 }
 
-async fn connect_to_server(scheduler_address: &str) -> crate::Result<TcpStream> {
-    log::info!("Connecting to server {}", scheduler_address);
-    let address = lookup_host(&scheduler_address)
-        .await?
-        .next()
-        .expect("Invalid scheduler address");
+async fn connect_to_server(address: SocketAddr) -> crate::Result<(TcpStream, SocketAddr)> {
+    log::info!("Connecting to server {}", address);
 
     let max_attempts = 20;
     for _ in 0..max_attempts {
         match TcpStream::connect(address).await {
             Ok(stream) => {
                 log::debug!("Connected to server");
-                return Ok(stream);
+                return Ok((stream, address));
             }
             Err(e) => {
-                log::error!("Could not connect to {}, error: {}", scheduler_address, e);
+                log::error!("Could not connect to {}, error: {}", address, e);
                 sleep(Duration::from_secs(2)).await;
             }
         }
@@ -75,15 +72,8 @@ async fn connect_to_server(scheduler_address: &str) -> crate::Result<TcpStream> 
     ))
 }
 
-pub async fn run_worker(
-    scheduler_address: &str,
-    mut configuration: WorkerConfiguration,
-    secret_key: Option<Arc<SecretKey>>,
-    launcher_setup: InnerTaskLauncher,
-) -> crate::Result<((WorkerId, WorkerConfiguration), impl Future<Output = ()>)> {
-    let (listener, address) = start_listener().await?;
-    configuration.listen_address = address;
-    let stream = connect_to_server(&scheduler_address).await?;
+pub async fn connect_to_server_and_authenticate(server_address: SocketAddr, secret_key: &Option<Arc<SecretKey>>) -> crate::Result<ConnectionDescriptor> {
+    let (stream, address) = connect_to_server(server_address).await?;
     let (mut writer, mut reader) = make_protocol_builder().new_framed(stream).split();
     let (mut sealer, mut opener) = do_authentication(
         0,
@@ -93,8 +83,26 @@ pub async fn run_worker(
         &mut writer,
         &mut reader,
     )
-    .await?;
+        .await?;
+    Ok(ConnectionDescriptor {
+        address,
+        receiver: reader,
+        sender: writer,
+        sealer,
+        opener
+    })
+}
 
+
+pub async fn run_worker(
+    scheduler_address: SocketAddr,
+    mut configuration: WorkerConfiguration,
+    secret_key: Option<Arc<SecretKey>>,
+    launcher_setup: InnerTaskLauncher,
+) -> crate::Result<((WorkerId, WorkerConfiguration), impl Future<Output = ()>)> {
+    let (listener, address) = start_listener().await?;
+    configuration.listen_address = address;
+    let ConnectionDescriptor { mut sender, mut receiver, mut opener, mut sealer, .. } = connect_to_server_and_authenticate(scheduler_address, &secret_key).await?;
     let taskset = LocalSet::default();
 
     {
@@ -102,7 +110,7 @@ pub async fn run_worker(
             configuration: configuration.clone(),
         });
         let data = serialize(&message)?.into();
-        writer.send(seal_message(&mut sealer, data)).await?;
+        sender.send(seal_message(&mut sealer, data)).await?;
     }
 
     let (queue_sender, queue_receiver) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
@@ -111,7 +119,7 @@ pub async fn run_worker(
     let heartbeat_interval = configuration.heartbeat_interval;
 
     let (worker_id, state) = {
-        match timeout(Duration::from_secs(15), reader.next()).await {
+        match timeout(Duration::from_secs(15), receiver.next()).await {
             Ok(Some(data)) => {
                 let message: WorkerRegistrationResponse = open_message(&mut opener, &data?)?;
                 (
@@ -178,12 +186,12 @@ pub async fn run_worker(
     Ok(((worker_id, configuration), async move {
         tokio::select! {
             () = try_start_tasks => { unreachable!() }
-            worker_res = worker_message_loop(state.clone(), reader, opener) => {
+            worker_res = worker_message_loop(state.clone(), receiver, opener) => {
                 if let Err(e) = worker_res {
                     panic!("Main worker loop failed: {}", e);
                 }
             }
-            _ = forward_queue_to_sealed_sink(queue_receiver, writer, sealer) => {
+            _ = forward_queue_to_sealed_sink(queue_receiver, sender, sealer) => {
                 panic!("Cannot send a message to server");
             }
             _result = taskset.run_until(connection_initiator(listener, state.clone())) => {

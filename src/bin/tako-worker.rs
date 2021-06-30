@@ -20,6 +20,8 @@ use tako::messages::common::{ProgramDefinition, WorkerConfiguration};
 use tako::worker::launcher::{command_from_definitions, pin_program};
 use tako::worker::rpc::run_worker;
 use tako::worker::task::{Task, TaskRef};
+use tokio::net::lookup_host;
+use std::net::SocketAddr;
 
 #[derive(Clap)]
 #[clap(version = "1.0")]
@@ -105,7 +107,7 @@ fn launcher(task_ref: &TaskRef) -> Pin<Box<dyn Future<Output = tako::Result<()>>
 }
 
 async fn worker_main(
-    server_address: &str,
+    server_address: SocketAddr,
     configuration: WorkerConfiguration,
     secret_key: Option<Arc<SecretKey>>,
 ) -> tako::Result<()> {
@@ -167,8 +169,16 @@ async fn main() -> tako::Result<()> {
     };
 
     let local_set = LocalSet::new();
+    let server_address = opts.server_address;
     local_set
-        .run_until(worker_main(&opts.server_address, configuration, secret_key))
+        .run_until(async move {
+            match lookup_host(&server_address).await {
+                Ok(mut addrs) => { let address = addrs.next()
+                .expect("Invalid server address");
+                worker_main(address, configuration, secret_key).await },
+                Err(e) => Result::Err(e.into())
+            }
+        })
         .await?;
     log::info!("tako worker ends");
     Ok(())
